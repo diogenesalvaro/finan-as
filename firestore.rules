@@ -1,0 +1,193 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId (UID)
+    // Fields:
+    //   - uid: string (required)
+    //   - displayName: string (required)
+    //   - email: string (required)
+    //   - familyId: string (required)
+    //   - role: string (enum: ['admin', 'member'])
+    //   - photoURL: string (optional)
+    //
+    // Collection: families
+    // Document ID: familyId
+    // Fields:
+    //   - name: string (required)
+    //   - ownerId: string (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: transactions
+    // Document ID: transactionId
+    // Fields:
+    //   - familyId: string (required)
+    //   - userId: string (required)
+    //   - userName: string (required)
+    //   - amount: number (required)
+    //   - type: string (enum: ['income', 'expense'])
+    //   - category: string (required)
+    //   - description: string (optional)
+    //   - date: timestamp (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: goals
+    // Document ID: goalId
+    // Fields:
+    //   - familyId: string (required)
+    //   - title: string (required)
+    //   - targetAmount: number (required)
+    //   - currentAmount: number (required)
+    //   - deadline: timestamp (optional)
+    //   - isCompleted: bool (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: cards
+    // Document ID: cardId
+    // Fields:
+    //   - familyId: string (required)
+    //   - userId: string (required)
+    //   - cardName: string (required)
+    //   - cardNumberLast4: string (required)
+    //   - expiryDate: string (optional)
+    //   - limit: number (optional)
+    //   - currentBalance: number (optional)
+    //   - color: string (optional)
+    //   - type: string (enum: ['credit', 'debit'])
+    //   - createdAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "diogenesalvaro641@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isFamilyMember(familyId) {
+      return isAuthenticated() && getUserData().familyId == familyId;
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // ===============================================================
+    // Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.uid is string && data.uid.size() > 0 &&
+             data.displayName is string && data.displayName.size() > 0 && data.displayName.size() < 100 &&
+             data.email is string && isValidEmail(data.email) &&
+             data.familyId is string && data.familyId.size() > 0 &&
+             (data.role in ['admin', 'member']);
+    }
+
+    function isValidFamily(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.ownerId is string && data.ownerId.size() > 0 &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.familyId is string && data.familyId.size() > 0 &&
+             data.userId is string && data.userId.size() > 0 &&
+             data.userName is string && data.userName.size() > 0 &&
+             data.amount is number &&
+             (data.type in ['income', 'expense']) &&
+             data.category is string && data.category.size() > 0 &&
+             data.date is timestamp &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidGoal(data) {
+      return data.familyId is string && data.familyId.size() > 0 &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.targetAmount is number && data.targetAmount > 0 &&
+             data.currentAmount is number && data.currentAmount >= 0 &&
+             data.isCompleted is bool &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidCard(data) {
+      return data.familyId is string && data.familyId.size() > 0 &&
+             data.userId is string && data.userId.size() > 0 &&
+             data.cardName is string && data.cardName.size() > 0 && data.cardName.size() < 100 &&
+             data.cardNumberLast4 is string && data.cardNumberLast4.matches("^\\d{4}$") &&
+             (data.type in ['credit', 'debit']) &&
+             data.createdAt is timestamp &&
+             (!('limit' in data) || data.limit is number) &&
+             (!('currentBalance' in data) || data.currentBalance is number) &&
+             (!('expiryDate' in data) || data.expiryDate is string) &&
+             (!('color' in data) || data.color is string) &&
+             (!('isShared' in data) || data.isShared is bool);
+    }
+
+    // ===============================================================
+    // Matches
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
+                      request.resource.data.role == resource.data.role; // Cannot change own role
+    }
+
+    match /families/{familyId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isFamilyMember(familyId));
+      allow create: if isAuthenticated() && isValidFamily(request.resource.data) && request.resource.data.ownerId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.ownerId == request.auth.uid && isValidFamily(request.resource.data);
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && isFamilyMember(resource.data.familyId);
+      allow create: if isAuthenticated() && isFamilyMember(request.resource.data.familyId) && isValidTransaction(request.resource.data);
+      allow update: if isAuthenticated() && isFamilyMember(resource.data.familyId) && isValidTransaction(request.resource.data) && resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && isFamilyMember(resource.data.familyId) && resource.data.userId == request.auth.uid;
+    }
+
+    match /goals/{goalId} {
+      allow read: if isAuthenticated() && isFamilyMember(resource.data.familyId);
+      allow create: if isAuthenticated() && isFamilyMember(request.resource.data.familyId) && isValidGoal(request.resource.data);
+      allow update: if isAuthenticated() && isFamilyMember(resource.data.familyId) && isValidGoal(request.resource.data);
+      allow delete: if isAuthenticated() && isFamilyMember(resource.data.familyId);
+    }
+
+    match /cards/{cardId} {
+      allow read: if isAuthenticated() && isFamilyMember(resource.data.familyId) && 
+                  (resource.data.userId == request.auth.uid || resource.data.isShared == true);
+      allow create: if isAuthenticated() && isFamilyMember(request.resource.data.familyId) && isValidCard(request.resource.data);
+      allow update: if isAuthenticated() && isFamilyMember(resource.data.familyId) && isValidCard(request.resource.data) && 
+                    (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAuthenticated() && isFamilyMember(resource.data.familyId) && 
+                    (resource.data.userId == request.auth.uid || isAdmin());
+    }
+  }
+}

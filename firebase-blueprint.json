@@ -1,0 +1,101 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A family member user profile.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "familyId": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "member"] },
+        "photoURL": { "type": "string" }
+      },
+      "required": ["uid", "displayName", "email", "familyId"]
+    },
+    "Family": {
+      "title": "Family",
+      "description": "A family group for financial tracking.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "ownerId", "createdAt"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A financial transaction (income or expense).",
+      "type": "object",
+      "properties": {
+        "familyId": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["familyId", "userId", "amount", "type", "category", "date"]
+    },
+    "Goal": {
+      "title": "Goal",
+      "description": "A family financial goal.",
+      "type": "object",
+      "properties": {
+        "familyId": { "type": "string" },
+        "title": { "type": "string" },
+        "targetAmount": { "type": "number" },
+        "currentAmount": { "type": "number" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "isCompleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["familyId", "title", "targetAmount", "currentAmount"]
+    },
+    "CreditCard": {
+      "title": "CreditCard",
+      "description": "A credit or debit card for the family.",
+      "type": "object",
+      "properties": {
+        "familyId": { "type": "string" },
+        "userId": { "type": "string" },
+        "cardName": { "type": "string" },
+        "cardNumberLast4": { "type": "string" },
+        "expiryDate": { "type": "string" },
+        "limit": { "type": "number" },
+        "currentBalance": { "type": "number" },
+        "color": { "type": "string" },
+        "type": { "type": "string", "enum": ["credit", "debit"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["familyId", "userId", "cardName", "cardNumberLast4", "type"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles."
+    },
+    "/families/{familyId}": {
+      "schema": "Family",
+      "description": "Family groups."
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Financial transactions."
+    },
+    "/goals/{goalId}": {
+      "schema": "Goal",
+      "description": "Financial goals."
+    },
+    "/cards/{cardId}": {
+      "schema": "CreditCard",
+      "description": "Credit and debit cards."
+    }
+  }
+}
