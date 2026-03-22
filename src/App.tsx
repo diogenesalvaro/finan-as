@@ -1,29 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  GoogleAuthProvider, 
-  signInWithPopup, 
-  onAuthStateChanged, 
-  signOut, 
-  User as FirebaseUser 
-} from 'firebase/auth';
-import { 
-  collection, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  onSnapshot, 
-  query, 
-  where, 
-  orderBy, 
-  addDoc, 
-  Timestamp, 
-  updateDoc, 
-  deleteDoc,
-  limit
-} from 'firebase/firestore';
-import { auth, db } from './firebase';
-import { UserProfile, Family, Transaction, Goal, CATEGORIES, CreditCard } from './types';
-import { handleFirestoreError, OperationType } from './utils/error';
+import { User as SupabaseUser } from '@supabase/supabase-js';
+import { supabase } from './supabase';
+import { UserProfile, Family, Transaction, Goal, CATEGORIES, CreditCard, formatCurrency } from './types';
 import { 
   LayoutDashboard, 
   PlusCircle, 
@@ -79,9 +57,14 @@ const LoadingScreen = () => (
 
 const LoginScreen = () => {
   const handleLogin = async () => {
-    const provider = new GoogleAuthProvider();
     try {
-      await signInWithPopup(auth, provider);
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+      if (error) throw error;
     } catch (error) {
       console.error("Login failed:", error);
     }
@@ -112,7 +95,7 @@ const LoginScreen = () => {
   );
 };
 
-const SetupFamily = ({ user, onComplete }: { user: FirebaseUser, onComplete: () => void }) => {
+const SetupFamily = ({ user, onComplete }: { user: SupabaseUser, onComplete: () => void }) => {
   const [familyName, setFamilyName] = useState('');
   const [familyIdToJoin, setFamilyIdToJoin] = useState('');
   const [loading, setLoading] = useState(false);
@@ -129,23 +112,34 @@ const SetupFamily = ({ user, onComplete }: { user: FirebaseUser, onComplete: () 
     if (!familyName.trim()) return;
     setLoading(true);
     try {
-      const familyRef = await addDoc(collection(db, 'families'), {
-        name: familyName,
-        ownerId: user.uid,
-        createdAt: Timestamp.now()
-      });
+      // Create family
+      const { data: familyData, error: familyError } = await supabase
+        .from('families')
+        .insert({
+          name: familyName,
+          owner_id: user.id
+        })
+        .select()
+        .single();
 
-      await setDoc(doc(db, 'users', user.uid), {
-        uid: user.uid,
-        displayName: user.displayName || 'Usuário',
-        email: user.email || '',
-        familyId: familyRef.id,
-        role: 'admin',
-        photoURL: user.photoURL || ''
-      });
+      if (familyError) throw familyError;
+
+      // Create/Update profile
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .upsert({
+          id: user.id,
+          display_name: user.user_metadata.full_name || 'Usuário',
+          email: user.email || '',
+          family_id: familyData.id,
+          role: 'admin',
+          photo_url: user.user_metadata.avatar_url || ''
+        });
+
+      if (profileError) throw profileError;
       onComplete();
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'families/users');
+      console.error('Error in handleCreateFamily:', error);
       showNotification('Erro ao configurar família.', 'error');
     } finally {
       setLoading(false);
@@ -157,23 +151,34 @@ const SetupFamily = ({ user, onComplete }: { user: FirebaseUser, onComplete: () 
     if (!familyIdToJoin.trim()) return;
     setLoading(true);
     try {
-      const familySnap = await getDoc(doc(db, 'families', familyIdToJoin.trim()));
-      if (!familySnap.exists()) {
+      // Check if family exists
+      const { data: familyData, error: familyError } = await supabase
+        .from('families')
+        .select('id')
+        .eq('id', familyIdToJoin.trim())
+        .single();
+
+      if (familyError || !familyData) {
         showNotification('Família não encontrada. Verifique o ID.', 'error');
         return;
       }
 
-      await setDoc(doc(db, 'users', user.uid), {
-        uid: user.uid,
-        displayName: user.displayName || 'Usuário',
-        email: user.email || '',
-        familyId: familyIdToJoin.trim(),
-        role: 'member',
-        photoURL: user.photoURL || ''
-      });
+      // Update profile
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .upsert({
+          id: user.id,
+          display_name: user.user_metadata.full_name || 'Usuário',
+          email: user.email || '',
+          family_id: familyData.id,
+          role: 'member',
+          photo_url: user.user_metadata.avatar_url || ''
+        });
+
+      if (profileError) throw profileError;
       onComplete();
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'users');
+      console.error('Error in handleJoinFamily:', error);
       showNotification('Erro ao entrar na família. Verifique o ID.', 'error');
     } finally {
       setLoading(false);
@@ -266,7 +271,7 @@ const SetupFamily = ({ user, onComplete }: { user: FirebaseUser, onComplete: () 
 // --- Main App Component ---
 
 export default function App() {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [user, setUser] = useState<SupabaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [family, setFamily] = useState<Family | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -278,7 +283,11 @@ export default function App() {
     const map = new Map<string, CreditCard>();
     sharedCards.forEach(c => map.set(c.id, c));
     myCards.forEach(c => map.set(c.id, c));
-    return Array.from(map.values()).sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
+    return Array.from(map.values()).sort((a, b) => {
+      const dateA = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
+      const dateB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
+      return dateB - dateA;
+    });
   }, [sharedCards, myCards]);
 
   const [familyMembers, setFamilyMembers] = useState<UserProfile[]>([]);
@@ -313,28 +322,30 @@ export default function App() {
       return;
     }
     try {
-      console.log('Adding card to Firestore...');
-      const cardData = {
-        cardName: data.cardName,
-        cardNumberLast4: data.cardNumberLast4,
-        expiryDate: data.expiryDate || '',
-        limit: Number(data.limit) || 0,
-        currentBalance: Number(data.currentBalance) || 0,
-        color: data.color || '#1e293b',
-        type: data.type,
-        familyId: profile.familyId,
-        userId: user.uid,
-        createdAt: Timestamp.now(),
-        isShared: data.isShared || false
-      };
-      await addDoc(collection(db, 'cards'), cardData);
+      console.log('Adding card to Supabase...');
+      const { error } = await supabase
+        .from('credit_cards')
+        .insert({
+          card_name: data.cardName,
+          card_number_last4: data.cardNumberLast4,
+          expiry_date: data.expiryDate || '',
+          card_limit: Number(data.limit) || 0,
+          current_balance: Number(data.currentBalance) || 0,
+          color: data.color || '#1e293b',
+          type: data.type,
+          family_id: profile.familyId,
+          user_id: user.id,
+          is_shared: data.isShared || false
+        });
+
+      if (error) throw error;
+
       console.log('Card added successfully');
       setShowAddCard(false);
       showNotification('Cartão adicionado com sucesso!');
     } catch (error) {
       console.error('Error in handleCreateCard:', error);
       showNotification('Erro ao adicionar cartão. Verifique os dados e tente novamente.', 'error');
-      handleFirestoreError(error, OperationType.WRITE, 'cards');
     }
   };
 
@@ -344,11 +355,16 @@ export default function App() {
       message: 'Tem certeza que deseja excluir este cartão?',
       onConfirm: async () => {
         try {
-          await deleteDoc(doc(db, 'cards', id));
+          const { error } = await supabase
+            .from('credit_cards')
+            .delete()
+            .eq('id', id);
+          if (error) throw error;
           setConfirmModal(null);
           showNotification('Cartão excluído com sucesso!');
         } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, 'cards');
+          console.error('Error in handleDeleteCard:', error);
+          showNotification('Erro ao excluir cartão.', 'error');
         }
       }
     });
@@ -356,122 +372,239 @@ export default function App() {
 
   const handleToggleCardVisibility = async (id: string, isShared: boolean) => {
     try {
-      await updateDoc(doc(db, 'cards', id), { isShared });
+      const { error } = await supabase
+        .from('credit_cards')
+        .update({ is_shared: isShared })
+        .eq('id', id);
+      if (error) throw error;
       showNotification(isShared ? 'Cartão agora é visível para a família.' : 'Cartão agora é privado.');
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `cards/${id}`);
+      console.error('Error in handleToggleCardVisibility:', error);
       showNotification('Erro ao alterar visibilidade do cartão.', 'error');
     }
   };
 
   // Auth Listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      if (!u) {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (!session) {
         setProfile(null);
         setFamily(null);
         setLoading(false);
       }
     });
-    return unsubscribe;
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (!session) {
+        setProfile(null);
+        setFamily(null);
+        setLoading(false);
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   // Profile & Family Listener
   useEffect(() => {
     if (!user) return;
 
-    const unsubscribeProfile = onSnapshot(doc(db, 'users', user.uid), (docSnap) => {
-      if (docSnap.exists()) {
-        const p = docSnap.data() as UserProfile;
-        setProfile(p);
-        
-        // Family Listener
-        onSnapshot(doc(db, 'families', p.familyId), (familySnap) => {
-          if (familySnap.exists()) {
-            setFamily({ id: familySnap.id, ...familySnap.data() } as Family);
+    // Profile listener
+    const fetchProfileAndFamily = async () => {
+      try {
+        const { data: profileData, error: profileError } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', user.id)
+          .single();
+
+        if (profileError) {
+          if (profileError.code !== 'PGRST116') { // PGRST116 is 'no rows returned'
+            console.error('Error fetching profile:', profileError);
           }
-        });
-      } else {
-        setProfile(null);
+          setProfile(null);
+          setLoading(false);
+          return;
+        }
+
+        const p = {
+          uid: profileData.id,
+          displayName: profileData.display_name,
+          email: profileData.email,
+          familyId: profileData.family_id,
+          role: profileData.role,
+          photoURL: profileData.photo_url
+        } as UserProfile;
+        
+        setProfile(p);
+
+        if (p.familyId) {
+          const { data: familyData, error: familyError } = await supabase
+            .from('families')
+            .select('*')
+            .eq('id', p.familyId)
+            .single();
+
+          if (familyError) {
+            console.error('Error fetching family:', familyError);
+          } else {
+            setFamily({
+              id: familyData.id,
+              name: familyData.name,
+              ownerId: familyData.owner_id,
+              createdAt: familyData.created_at
+            } as any);
+          }
+        }
+        setLoading(false);
+      } catch (err) {
+        console.error('Error in fetchProfileAndFamily:', err);
+        setLoading(false);
       }
-      setLoading(false);
-    }, (err) => handleFirestoreError(err, OperationType.GET, `users/${user.uid}`));
+    };
 
-    return () => unsubscribeProfile();
-  }, [user]);
+    fetchProfileAndFamily();
 
-  // Transactions & Goals Listener
-  useEffect(() => {
-    if (!profile?.familyId || !user?.uid) return;
-
-    const qTransactions = query(
-      collection(db, 'transactions'),
-      where('familyId', '==', profile.familyId),
-      orderBy('date', 'desc')
-    );
-
-    const unsubscribeTransactions = onSnapshot(qTransactions, (snapshot) => {
-      const txs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Transaction));
-      setTransactions(txs);
-    }, (err) => handleFirestoreError(err, OperationType.GET, 'transactions'));
-
-    const qGoals = query(
-      collection(db, 'goals'),
-      where('familyId', '==', profile.familyId),
-      orderBy('createdAt', 'desc')
-    );
-
-    const unsubscribeGoals = onSnapshot(qGoals, (snapshot) => {
-      const gs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Goal));
-      setGoals(gs);
-    }, (err) => handleFirestoreError(err, OperationType.GET, 'goals'));
-
-    const qSharedCards = query(
-      collection(db, 'cards'),
-      where('familyId', '==', profile.familyId),
-      where('isShared', '==', true)
-    );
-
-    const qMyCards = query(
-      collection(db, 'cards'),
-      where('familyId', '==', profile.familyId),
-      where('userId', '==', user.uid)
-    );
-
-    const unsubscribeSharedCards = onSnapshot(qSharedCards, (snapshot) => {
-      const cs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as CreditCard));
-      setSharedCards(cs);
-    }, (err) => handleFirestoreError(err, OperationType.GET, 'cards'));
-
-    const unsubscribeMyCards = onSnapshot(qMyCards, (snapshot) => {
-      const cs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as CreditCard));
-      setMyCards(cs);
-    }, (err) => handleFirestoreError(err, OperationType.GET, 'cards'));
+    // Subscribe to profile changes
+    const profileSubscription = supabase
+      .channel(`profile:${user.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles', filter: `id=eq.${user.id}` }, fetchProfileAndFamily)
+      .subscribe();
 
     return () => {
-      unsubscribeTransactions();
-      unsubscribeGoals();
-      unsubscribeSharedCards();
-      unsubscribeMyCards();
+      supabase.removeChannel(profileSubscription);
     };
-  }, [profile?.familyId, user?.uid]);
+  }, [user]);
+
+  // Data Listeners (Transactions, Goals, Cards)
+  useEffect(() => {
+    if (!profile?.familyId || !user?.id) return;
+
+    const fetchAllData = async () => {
+      try {
+        // Transactions
+        const { data: txsData } = await supabase
+          .from('transactions')
+          .select('*')
+          .eq('family_id', profile.familyId)
+          .order('transaction_date', { ascending: false });
+        
+        if (txsData) {
+          setTransactions(txsData.map(t => ({
+            id: t.id,
+            familyId: t.family_id,
+            userId: t.user_id,
+            userName: t.user_name,
+            amount: t.amount,
+            type: t.type,
+            category: t.category,
+            description: t.description,
+            date: { toDate: () => new Date(t.transaction_date) },
+            createdAt: { toDate: () => new Date(t.created_at) }
+          } as any)));
+        }
+
+        // Goals
+        const { data: goalsData } = await supabase
+          .from('goals')
+          .select('*')
+          .eq('family_id', profile.familyId)
+          .order('created_at', { ascending: false });
+        
+        if (goalsData) {
+          setGoals(goalsData.map(g => ({
+            id: g.id,
+            familyId: g.family_id,
+            title: g.title,
+            targetAmount: g.target_amount,
+            currentAmount: g.current_amount,
+            deadline: g.deadline ? { toDate: () => new Date(g.deadline) } : undefined,
+            isCompleted: g.is_completed,
+            createdAt: { toDate: () => new Date(g.created_at) }
+          } as any)));
+        }
+
+        // Cards
+        const { data: cardsData } = await supabase
+          .from('credit_cards')
+          .select('*')
+          .eq('family_id', profile.familyId);
+        
+        if (cardsData) {
+          const mappedCards = cardsData.map(c => ({
+            id: c.id,
+            familyId: c.family_id,
+            userId: c.user_id,
+            cardName: c.card_name,
+            cardNumberLast4: c.card_number_last4,
+            expiryDate: c.expiry_date,
+            limit: c.card_limit,
+            currentBalance: c.current_balance,
+            color: c.color,
+            type: c.type,
+            isShared: c.is_shared,
+            createdAt: new Date(c.created_at)
+          } as any));
+
+          setSharedCards(mappedCards.filter(c => c.isShared));
+          setMyCards(mappedCards.filter(c => c.userId === user.id));
+        }
+      } catch (err) {
+        console.error('Error fetching data:', err);
+      }
+    };
+
+    fetchAllData();
+
+    // Subscribe to changes for all relevant tables
+    const dataChannel = supabase
+      .channel(`family_data:${profile.familyId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions', filter: `family_id=eq.${profile.familyId}` }, fetchAllData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'goals', filter: `family_id=eq.${profile.familyId}` }, fetchAllData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'credit_cards', filter: `family_id=eq.${profile.familyId}` }, fetchAllData)
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(dataChannel);
+    };
+  }, [profile?.familyId, user?.id]);
 
   // Family Members Listener
   useEffect(() => {
     if (!profile?.familyId) return;
 
-    const qMembers = query(
-      collection(db, 'users'),
-      where('familyId', '==', profile.familyId)
-    );
+    const fetchMembers = async () => {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('family_id', profile.familyId);
+      
+      if (error) {
+        console.error('Error fetching family members:', error);
+      } else if (data) {
+        setFamilyMembers(data.map(m => ({
+          uid: m.id,
+          displayName: m.display_name,
+          email: m.email,
+          familyId: m.family_id,
+          role: m.role,
+          photoURL: m.photo_url
+        } as UserProfile)));
+      }
+    };
 
-    const unsubscribe = onSnapshot(qMembers, (snapshot) => {
-      const members = snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() } as UserProfile));
-      setFamilyMembers(members);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'users'));
+    fetchMembers();
 
-    return unsubscribe;
+    const membersSubscription = supabase
+      .channel(`members:${profile.familyId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles', filter: `family_id=eq.${profile.familyId}` }, fetchMembers)
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(membersSubscription);
+    };
   }, [profile?.familyId]);
 
   // Auto-hide notification
@@ -490,10 +623,10 @@ export default function App() {
     }
     const now = new Date();
     const monthlyIncome = transactions
-      .filter(tx => tx.type === 'income' && tx.date.toDate().getMonth() === now.getMonth() && tx.date.toDate().getFullYear() === now.getFullYear())
+      .filter(tx => tx.type === 'income' && new Date(tx.date.toDate()).getMonth() === now.getMonth() && new Date(tx.date.toDate()).getFullYear() === now.getFullYear())
       .reduce((sum, tx) => sum + tx.amount, 0);
     const monthlyExpense = transactions
-      .filter(tx => tx.type === 'expense' && tx.date.toDate().getMonth() === now.getMonth() && tx.date.toDate().getFullYear() === now.getFullYear())
+      .filter(tx => tx.type === 'expense' && new Date(tx.date.toDate()).getMonth() === now.getMonth() && new Date(tx.date.toDate()).getFullYear() === now.getFullYear())
       .reduce((sum, tx) => sum + tx.amount, 0);
     
     if (monthlyIncome > monthlyExpense && monthlyExpense > 0) {
@@ -514,7 +647,7 @@ export default function App() {
   const stats = useMemo(() => {
     const now = new Date();
     const currentMonthTxs = transactions.filter(tx => {
-      const txDate = tx.date.toDate();
+      const txDate = new Date(tx.date.toDate());
       return txDate.getMonth() === now.getMonth() && txDate.getFullYear() === now.getFullYear();
     });
 
@@ -535,7 +668,7 @@ export default function App() {
       const monthDate = subMonths(now, i);
       const mLabel = format(monthDate, 'MMM', { locale: ptBR });
       const monthTxs = transactions.filter(tx => {
-        const txDate = tx.date.toDate();
+        const txDate = new Date(tx.date.toDate());
         return txDate.getMonth() === monthDate.getMonth() && txDate.getFullYear() === monthDate.getFullYear();
       });
       const mIncome = monthTxs.filter(tx => tx.type === 'income').reduce((sum, tx) => sum + tx.amount, 0);
@@ -578,7 +711,7 @@ export default function App() {
             </div>
           </div>
           <button 
-            onClick={() => signOut(auth)}
+            onClick={() => supabase.auth.signOut()}
             className="flex items-center gap-2 text-slate-500 hover:text-red-600 transition-colors text-sm font-medium"
           >
             <LogOut className="w-4 h-4" /> Sair
@@ -777,7 +910,7 @@ export default function App() {
                     <tbody className="divide-y divide-slate-100">
                       {transactions.map(tx => (
                         <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="px-6 py-4 text-sm text-slate-600">{format(tx.date.toDate(), 'dd/MM/yyyy')}</td>
+                          <td className="px-6 py-4 text-sm text-slate-600">{format(new Date(tx.date.toDate()), 'dd/MM/yyyy')}</td>
                           <td className="px-6 py-4 text-sm font-medium text-slate-900">{tx.description || tx.category}</td>
                           <td className="px-6 py-4">
                             <span className="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-xs font-medium">{tx.category}</span>
@@ -848,7 +981,7 @@ export default function App() {
                         </div>
                         <div>
                           <h2 className="text-xl font-bold text-slate-900">{family?.name}</h2>
-                          <p className="text-slate-500">Desde {family && format(family.createdAt.toDate(), 'MMMM yyyy', { locale: ptBR })}</p>
+                          <p className="text-slate-500">Desde {family && format(new Date(family.createdAt), 'MMMM yyyy', { locale: ptBR })}</p>
                         </div>
                       </div>
                       <div className="text-right">
@@ -884,7 +1017,7 @@ export default function App() {
                             <p className="font-bold text-emerald-600">
                               {formatCurrency(
                                 transactions
-                                  .filter(tx => tx.userId === member.uid && tx.type === 'income' && tx.date.toDate().getMonth() === new Date().getMonth())
+                                  .filter(tx => tx.userId === member.uid && tx.type === 'income' && new Date(tx.date.toDate()).getMonth() === new Date().getMonth())
                                   .reduce((sum, tx) => sum + tx.amount, 0)
                               )}
                             </p>
@@ -1002,20 +1135,28 @@ export default function App() {
         {showAddTransaction && (
           <TransactionModal 
             onClose={() => setShowAddTransaction(false)} 
-            onSubmit={async (data) => {
-              try {
-                await addDoc(collection(db, 'transactions'), {
-                  ...data,
-                  familyId: profile.familyId,
-                  userId: profile.uid,
-                  userName: profile.displayName,
-                  createdAt: Timestamp.now()
+          onSubmit={async (data) => {
+            try {
+              const { error } = await supabase
+                .from('transactions')
+                .insert({
+                  family_id: profile.familyId,
+                  user_id: user.id,
+                  user_name: profile.displayName,
+                  amount: data.amount,
+                  type: data.type,
+                  category: data.category,
+                  description: data.description,
+                  transaction_date: data.date.toISOString()
                 });
-                setShowAddTransaction(false);
-              } catch (err) {
-                handleFirestoreError(err, OperationType.WRITE, 'transactions');
-              }
-            }}
+              if (error) throw error;
+              setShowAddTransaction(false);
+              showNotification('Transação adicionada com sucesso!');
+            } catch (err) {
+              console.error('Error adding transaction:', err);
+              showNotification('Erro ao adicionar transação.', 'error');
+            }
+          }}
           />
         )}
       </AnimatePresence>
@@ -1026,19 +1167,25 @@ export default function App() {
           <GoalModal 
             onClose={() => setShowAddGoal(false)}
             onSubmit={async (data) => {
-              try {
-                await addDoc(collection(db, 'goals'), {
-                  ...data,
-                  familyId: profile.familyId,
-                  currentAmount: 0,
-                  isCompleted: false,
-                  createdAt: Timestamp.now()
+            try {
+              const { error } = await supabase
+                .from('goals')
+                .insert({
+                  family_id: profile.familyId,
+                  title: data.title,
+                  target_amount: data.targetAmount,
+                  current_amount: 0,
+                  deadline: data.deadline ? data.deadline.toISOString() : null,
+                  is_completed: false
                 });
-                setShowAddGoal(false);
-              } catch (err) {
-                handleFirestoreError(err, OperationType.WRITE, 'goals');
-              }
-            }}
+              if (error) throw error;
+              setShowAddGoal(false);
+              showNotification('Meta criada com sucesso!');
+            } catch (err) {
+              console.error('Error adding goal:', err);
+              showNotification('Erro ao criar meta.', 'error');
+            }
+          }}
           />
         )}
       </AnimatePresence>
@@ -1086,10 +1233,14 @@ export default function App() {
       message: 'Tem certeza que deseja excluir esta transação? Esta ação não pode ser desfeita.',
       onConfirm: async () => {
         try {
-          await deleteDoc(doc(db, 'transactions', id));
+          const { error } = await supabase
+            .from('transactions')
+            .delete()
+            .eq('id', id);
+          if (error) throw error;
           showNotification('Transação excluída com sucesso!');
         } catch (err) {
-          handleFirestoreError(err, OperationType.DELETE, `transactions/${id}`);
+          console.error('Error deleting transaction:', err);
           showNotification('Erro ao excluir transação.', 'error');
         } finally {
           setConfirmModal(null);
@@ -1100,12 +1251,26 @@ export default function App() {
 
   async function handleUpdateGoal(id: string, updates: Partial<Goal>) {
     try {
-      await updateDoc(doc(db, 'goals', id), updates);
+      // Map frontend updates to database columns
+      const dbUpdates: any = {};
+      if (updates.currentAmount !== undefined) dbUpdates.current_amount = updates.currentAmount;
+      if (updates.targetAmount !== undefined) dbUpdates.target_amount = updates.targetAmount;
+      if (updates.title !== undefined) dbUpdates.title = updates.title;
+      if (updates.isCompleted !== undefined) dbUpdates.is_completed = updates.isCompleted;
+      if (updates.deadline !== undefined) dbUpdates.deadline = (updates.deadline as any).toISOString();
+
+      const { error } = await supabase
+        .from('goals')
+        .update(dbUpdates)
+        .eq('id', id);
+      
+      if (error) throw error;
+
       if (updates.currentAmount !== undefined) {
         showNotification('Progresso atualizado!');
       }
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `goals/${id}`);
+      console.error('Error updating goal:', err);
       showNotification('Erro ao atualizar meta.', 'error');
     }
   }
@@ -1116,10 +1281,14 @@ export default function App() {
       message: 'Tem certeza que deseja excluir esta meta? Esta ação não pode ser desfeita.',
       onConfirm: async () => {
         try {
-          await deleteDoc(doc(db, 'goals', id));
+          const { error } = await supabase
+            .from('goals')
+            .delete()
+            .eq('id', id);
+          if (error) throw error;
           showNotification('Meta excluída com sucesso!');
         } catch (err) {
-          handleFirestoreError(err, OperationType.DELETE, `goals/${id}`);
+          console.error('Error deleting goal:', err);
           showNotification('Erro ao excluir meta.', 'error');
         } finally {
           setConfirmModal(null);
@@ -1172,7 +1341,7 @@ function TransactionItem({ tx }: { tx: Transaction, key?: React.Key }) {
       </div>
       <div>
         <p className="font-semibold text-slate-900 text-sm">{tx.description || tx.category}</p>
-        <p className="text-xs text-slate-500">{tx.userName} • {format(tx.date.toDate(), 'dd MMM', { locale: ptBR })}</p>
+        <p className="text-xs text-slate-500">{tx.userName} • {format(new Date(tx.date.toDate()), 'dd MMM', { locale: ptBR })}</p>
       </div>
     </div>
     <p className={`font-bold ${tx.type === 'income' ? 'text-emerald-600' : 'text-rose-600'}`}>
@@ -1212,9 +1381,9 @@ function GoalCard({ goal, compact, onUpdate, onDelete, isAdmin, setShowAddFunds,
       {!compact && (
         <div className="flex items-center justify-between mt-4">
           <div className="flex items-center gap-1 text-xs text-slate-400">
-            <Calendar className="w-3 h-3" />
-            {goal.deadline ? format(goal.deadline.toDate(), 'dd/MM/yy') : 'Sem prazo'}
-          </div>
+          <Calendar className="w-3 h-3" />
+          {goal.deadline ? format(new Date(goal.deadline.toDate()), 'dd/MM/yy') : 'Sem prazo'}
+        </div>
           <button 
             onClick={() => setShowAddFunds(goal)}
             className="text-xs font-bold text-emerald-600 hover:underline"
@@ -1567,6 +1736,7 @@ const TransactionModal = ({ onClose, onSubmit }: { onClose: () => void, onSubmit
           </div>
 
           <button 
+            type="button"
             onClick={() => {
               if (!amount || !category) return;
               onSubmit({
@@ -1574,7 +1744,7 @@ const TransactionModal = ({ onClose, onSubmit }: { onClose: () => void, onSubmit
                 type,
                 category,
                 description,
-                date: Timestamp.fromDate(new Date(date + 'T12:00:00'))
+                date: new Date(date + 'T12:00:00')
               });
             }}
             className={`w-full py-4 rounded-2xl text-white font-bold text-lg shadow-lg transition-all ${
@@ -1641,12 +1811,13 @@ const GoalModal = ({ onClose, onSubmit }: { onClose: () => void, onSubmit: (data
           </div>
 
           <button 
+            type="button"
             onClick={() => {
               if (!title || !targetAmount) return;
               onSubmit({
                 title,
                 targetAmount: parseFloat(targetAmount),
-                deadline: deadline ? Timestamp.fromDate(new Date(deadline + 'T12:00:00')) : null
+                deadline: deadline ? new Date(deadline + 'T12:00:00') : null
               });
             }}
             className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold text-lg shadow-lg shadow-emerald-100 transition-all"

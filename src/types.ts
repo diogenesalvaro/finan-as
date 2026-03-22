@@ -1,5 +1,3 @@
-import { Timestamp } from 'firebase/firestore';
-
 export interface UserProfile {
   uid: string;
   displayName: string;
@@ -13,7 +11,7 @@ export interface Family {
   id: string;
   name: string;
   ownerId: string;
-  createdAt: Timestamp;
+  createdAt: any;
 }
 
 export interface Transaction {
@@ -25,8 +23,8 @@ export interface Transaction {
   type: 'income' | 'expense';
   category: string;
   description?: string;
-  date: Timestamp;
-  createdAt: Timestamp;
+  date: any;
+  createdAt: any;
 }
 
 export interface Goal {
@@ -35,9 +33,9 @@ export interface Goal {
   title: string;
   targetAmount: number;
   currentAmount: number;
-  deadline?: Timestamp;
+  deadline?: any;
   isCompleted: boolean;
-  createdAt: Timestamp;
+  createdAt: any;
 }
 
 export interface CreditCard {
@@ -51,7 +49,7 @@ export interface CreditCard {
   currentBalance?: number;
   color: string;
   type: 'credit' | 'debit';
-  createdAt: Timestamp;
+  createdAt: any;
   isShared?: boolean;
 }
 
@@ -59,3 +57,10 @@ export const CATEGORIES = {
   income: ['Salário', 'Investimentos', 'Presente', 'Outros'],
   expense: ['Alimentação', 'Moradia', 'Transporte', 'Saúde', 'Educação', 'Lazer', 'Outros']
 };
+
+export function formatCurrency(value: number) {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(value);
+}
